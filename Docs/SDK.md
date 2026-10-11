@@ -13,7 +13,7 @@ invoke 接收 PluginRequest 并返回 PluginResponse。`transform` 的 payload_j
 消息 JSON；文档采用 Paragraph/Segment/TextStyle/Image 结构化字段，extra_json 保留未知扩展；
 `ui.command` 同时携带文档、修订号和选区，返回 edit 时宿主核对 expected_revision。
 `ui.settings` 接收配置字段。UI 字段 kind 使用 text、number、switch、enum、color。
-`transform` 和 `event` 同时携带结构化 message（包含 document 与消息来源、身份、时序、状态、message_type）；
+`transform` 和 `event` 同时携带结构化 message（包含 document 与消息来源、身份、时序、状态、message_type、avatar_url）；
 `config.changed` 通知配置变化，payload_json 保留版本扩展入口。转换结果优先使用 edit.replacement，
 payload_json 可返回共享消息 JSON。Rust 用 document_to_proto/document_from_proto/message_to_proto 转换。
 
@@ -59,6 +59,16 @@ InternalPlugin 的宿主回调同步校验声明：未声明 ID 返回 `STATUS_E
 热更新自动复制活动实例声明，之后由候选注册请求更新自己的缓存。
 类型暂停继续接收和转换消息，调度跳过该类型；解除暂停后积压消息按原始顺序参与播放。
 Rust 示例在启用启动或后台投递时先注册 `remote`，再投递相应消息。
+
+## 接收者头像
+
+HTTP incoming/send 和 InternalPlugin `message.post` 的消息 JSON 支持可选 `avatar_url`：
+
+```json
+{"source_id":"internal:example.counter","username":"示例插件","avatar_url":"https://example.com/avatar.png","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"带头像的消息","style":{}}]}]}}
+```
+
+链接支持 HTTP/HTTPS，随消息保存并保留至转发、重试、插件事件和转换请求。Protobuf `Message` 追加可选字段 `avatar_url = 12`，省略字段的既有插件与历史记录继续兼容。客户端在后台加载图片，同一链接共享本次会话缓存，图片缺失、加载中或失败时显示姓名首个字素。建议提供直接图片链接或同源重定向；下载上限为 8 MiB，超时 5 秒。GIF 显示首帧缩略图。自己的头像由设置页的本地图片选择器管理。
 
 Rust 示例：`cargo build -p vchat-example-plugin`，读取 target/debug 的动态库。
 C++ 示例：安装 Protobuf 31.1，运行 `cmake -S Plugins -B target/cpp-plugin` 后构建。
