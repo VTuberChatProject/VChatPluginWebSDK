@@ -18,7 +18,8 @@ invoke 接收 PluginRequest 并返回 PluginResponse。`transform` 的 payload_j
 payload_json 可返回共享消息 JSON。Rust 用 document_to_proto/document_from_proto/message_to_proto 转换。
 
 HostApi.invoke 接收 HostRequest：log 记录日志；config 写回 JSON 配置；config.set 更新并投递配置变更事件；message.post 投递消息；message.types.register 注册消息类型；
-event.subscribe 注册订阅；ui.register 注册 UiContribution。权限分别使用 messages、events、ui。
+event.subscribe 注册订阅；ui.register 注册 UiContribution；frontend.register 声明一个可接收消息的前端；frontend.message 投递前端消息；frontend.receipt 提交前端回执；
+ui.window.* 请求宿主创建、更新或关闭 NanaUI 窗口。权限分别使用 messages、events、ui、frontend；所有新增服务的 payload_json 必须是有效 JSON，服务事件仍按插件代次排队。
 回调线程安全，宿主将事件入队。插件必须复制暂存的请求。HostContext 和 generation 随实例固定。
 
 quiesce 成功表示插件的后台线程、任务和宿主回调全部结束。resume 重新启用实例。
