@@ -19,7 +19,15 @@ payload_json 可返回共享消息 JSON。Rust 用 document_to_proto/document_fr
 
 HostApi.invoke 接收 HostRequest：log 记录日志；config 写回 JSON 配置；config.set 更新并投递配置变更事件；message.post 投递消息；message.types.register 注册消息类型；
 event.subscribe 注册订阅；ui.register 注册 UiContribution；frontend.register 声明一个可接收消息的前端；frontend.message 投递前端消息；frontend.receipt 提交前端回执；
-ui.window.* 请求宿主创建、更新或关闭 NanaUI 窗口。权限分别使用 messages、events、ui、frontend；所有新增服务的 payload_json 必须是有效 JSON，服务事件仍按插件代次排队。
+ui.window.* 请求宿主创建、更新或关闭 NanaUI 窗口。`web.route.register` 使用 `web` 权限注册整组 HTTP/WS 路由，重复或重叠的 method/path 会被拒绝，插件停用时路由与连接一并清理。示例：
+
+```json
+{"version":1,"routes":[{"kind":"http","method":"GET","path":"/example/*","operation":"example.http"},{"kind":"websocket","method":"GET","path":"/example-ws","operation":"example.ws"}]}
+```
+
+HTTP 路由调用插件的 operation，payload 包含 version、method、path、query、headers 和 byte-array body；PluginResponse 的 status、content_type、no_store、body 生成 HTTP 响应。WebSocket 由 WebService 建立和关闭，插件依次收到 `<operation>.open`、`<operation>.message`、`<operation>.close` 调用，payload 带 connection_id、path、query、preview 和 data。候选插件的 `start` 阶段同步校验路由冲突，校验失败会回滚热更新；成功路由在代次提交时切换。`websocket.send` 按 connection_id 单播，`websocket.broadcast` 向本插件频道广播原始 JSON；广播消息不会进入其他插件频道。两者 payload 使用 `{ "connection_id": "...", "data": ..., "preview": false }`，广播可省略 connection_id。
+
+权限分别使用 messages、events、ui、frontend、web；所有新增服务的 payload_json 必须是有效 JSON，服务事件仍按插件代次排队。
 回调线程安全，宿主将事件入队。插件必须复制暂存的请求。HostContext 和 generation 随实例固定。
 
 quiesce 成功表示插件的后台线程、任务和宿主回调全部结束。resume 重新启用实例。
