@@ -19,6 +19,7 @@ payload_json 可返回共享消息 JSON。Rust 用 document_to_proto/document_fr
 
 HostApi.invoke 接收 HostRequest：log 记录日志；config 写回 JSON 配置；config.set 更新并投递配置变更事件；message.post 投递消息；message.types.register 注册消息类型；
 event.subscribe 注册订阅；ui.register 注册 UiContribution；frontend.register 声明一个可接收消息的前端；frontend.message 投递前端消息；frontend.receipt 提交前端回执；
+frontend.clear 清空当前前端显示，与 frontend.message、frontend.receipt 共用 frontend 权限。
 ui.window.* 请求宿主创建、更新或关闭 NanaUI 窗口。`web.route.register` 使用 `web` 权限注册整组 HTTP/WS 路由，重复或重叠的 method/path 会被拒绝，插件停用时路由与连接一并清理。示例：
 
 ```json
@@ -29,6 +30,8 @@ HTTP 路由调用插件的 operation，payload 包含 version、method、path、
 
 权限分别使用 messages、events、ui、frontend、web；所有新增服务的 payload_json 必须是有效 JSON，服务事件仍按插件代次排队。
 回调线程安全，宿主将事件入队。插件必须复制暂存的请求。HostContext 和 generation 随实例固定。
+
+剧本投递的 `message` 操作在既有 `frontend_id`、`batch_id`、`message` 外携带 `run_id` 和递增的 `generation`。宿主按批次立即替换显示，NanaDialogue 的完成回执由 UI 实际逐字呈现结束后提交。`clear` 操作携带 `frontend_id`、`message_id`、`batch_id`、`run_id`、`generation`，插件通过 `frontend.clear` 转交宿主。宿主过滤已退休批次的显示更新、完成回执和异步失败；普通消息继续沿用原有投递格式。
 
 quiesce 成功表示插件的后台线程、任务和宿主回调全部结束。resume 重新启用实例。
 save_state 输出 StateSnapshot（插件 ID、非零格式版本、状态字节），restore_state 负责版本迁移。
