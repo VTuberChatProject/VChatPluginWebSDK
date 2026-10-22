@@ -1,4 +1,48 @@
-# InternalPlugin SDK
+# 插件 SDK
+
+## HTTP 插件 WebSocket 接入
+
+在「设置 → 拓展 → 基础设置」启用接口并复制统一令牌。默认连接地址为
+`ws://127.0.0.1:38601/api/v2/ws`，升级请求携带 `Authorization: Bearer <统一令牌>`。
+监听 IP 可设置为局域网地址或 `0.0.0.0`，连接时使用宿主设备实际 IP。服务开关即时生效，
+保存地址或轮换令牌后现有连接结束；插件使用新设置重新登记。端口 `0` 自动分配实际端口。
+
+双向 JSON 请求统一使用 `{version:2,id,operation,payload}`，`id` 在本连接的待决请求中唯一。
+响应为 `{version:2,id,result}` 或 `{version:2,id,error:{code:"request_failed",message}}`。
+升级后的首条消息须在 15 秒内发送 `register`，例如：
+
+```json
+{"version":2,"id":"register-1","operation":"register","payload":{"id":"example.remote","name":"远程插件","author":"Example","version":"1.0.0","description":"投递与处理远程消息","config_url":"http://127.0.0.1:39000/settings","capabilities":["messages","events","transform"]}}
+```
+
+登记成功返回 `result:{plugin_id,generation}`。名称、作者、版本、简介、配置网页和能力可省略；
+配置网页支持 HTTP/HTTPS。重复在线 ID 返回冲突错误，原连接继续服务。
+在线资料用于「插件列表」卡片；停用后连接保留，业务请求、事件接收和转换暂停，重连恢复宿主按 ID 保存的启用状态。
+
+| 操作 | 方向 | payload / result |
+| --- | --- | --- |
+| `message-types.register` | 插件 → 宿主 | payload 为下文消息类型声明；需要 `messages` 能力 |
+| `messages.incoming` | 插件 → 宿主 | payload 为消息 JSON，按来源自动转发策略入队；result 为接收的消息 |
+| `messages.send` | 插件 → 宿主 | payload 为同一消息 JSON，直接入队；result 为接收的消息 |
+| `event` | 宿主 → 插件 | payload 为事件对象，包含稳定 `event_id`、`kind`、`message`；需要 `events` 能力，事件无需响应 |
+| `transform` | 宿主 → 插件 | payload 为 `{version:2,message,document}`；返回 `result:{version:2,document}`；需要 `transform` 能力 |
+
+消息 JSON 包含 `username`、`document`，可选 `source_message_id`、`source_time`、`message_type`、
+`avatar_url`、`origin_ids`。`source_id` 可省略，宿主使用登记的插件 ID；显式填写时须与插件 ID 一致。
+宿主在应用队列边界执行文档校验和消息类型归属校验，错误通过同一请求 ID 返回。
+
+```json
+{"version":2,"id":"message-1","operation":"messages.incoming","payload":{"source_message_id":"upstream-1","username":"观众","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"你好","style":{}}]}]}}}
+```
+
+事件按 FIFO 投递，宿主保留最近 1000 条；插件持久化最后处理的 `event_id`，重连时在 `register.payload`
+中填写 `last_event_id`，宿主回放该 ID 之后的事件。历史已过期时登记返回错误，插件须重新同步业务状态。
+省略 `last_event_id` 时从实时事件开始。消费落后触发断连时同样使用此机制恢复。
+转换与 InternalPlugin 按处理顺序串行执行，单次超时 3 秒；超时、断线、错误响应及无效文档进入转换失败处理，
+迟到响应按连接代次丢弃。WebSocket 控制帧每 15 秒发送 Ping，45 秒缺少有效响应时回收连接；
+插件客户端应处理 Ping/Pong，并在断连后重新登记。关闭连接时宿主撤销该代次的在线资料和能力声明，保留历史与类型暂停策略。
+
+## InternalPlugin ABI
 
 ABI 主版本为 1，协议主版本为 1。Rust 使用 `vchat-plugin-api`，C/C++ 使用
 `internal_plugin.h` 和 `internal_plugin.proto`；生成器由 `protoc-bin-vendored = 3.2.0`
@@ -47,7 +91,7 @@ save_state 输出 StateSnapshot（插件 ID、非零格式版本、状态字节�
 
 ## 消息类型与暂停
 
-HTTP 插件使用 `POST /api/v1/message-types`，携带 `Authorization: Bearer <插件令牌>`；
+HTTP 插件使用 WebSocket 操作 `message-types.register`；
 InternalPlugin 使用 `HostRequest.service = "message.types.register"`，将相同 JSON 写入 `payload_json`。
 两者需要 `messages` 权限，并以完整列表替换当前插件声明；空列表移除声明，既有积压消息和暂停设置继续保留。
 版本必须为 1，ID 和中文名称必须非空，ID 在同一插件内唯一且应长期稳定。
@@ -56,7 +100,7 @@ InternalPlugin 使用 `HostRequest.service = "message.types.register"`，将相�
 {"version":1,"types":[{"id":"remote","label":"远程消息"},{"id":"danmaku","label":"弹幕消息"}]}
 ```
 
-声明成功后，在 `message.post`、HTTP incoming/send 的消息 JSON 中填写可选 `message_type`：
+声明成功后，在 `message.post`、WebSocket `messages.incoming`/`messages.send` 的消息 JSON 中填写可选 `message_type`：
 
 ```json
 {"source_id":"internal:example.counter","source_message_id":"1","message_type":"remote","username":"示例插件","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"远程消息","style":{}}]}]}}
@@ -74,7 +118,7 @@ Rust 示例在启用启动或后台投递时先注册 `remote`，再投递相应
 
 ## 接收者头像
 
-HTTP incoming/send 和 InternalPlugin `message.post` 的消息 JSON 支持可选 `avatar_url`：
+WebSocket `messages.incoming`/`messages.send` 和 InternalPlugin `message.post` 的消息 JSON 支持可选 `avatar_url`：
 
 ```json
 {"source_id":"internal:example.counter","username":"示例插件","avatar_url":"https://example.com/avatar.png","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"带头像的消息","style":{}}]}]}}
@@ -95,10 +139,10 @@ resources/<网页、媒体、默认配置、主题等>
 清单示例（入口文件名按目标平台生成）：
 
 ```json
-{"package_version":1,"entry":"bin/example.dll","id":"example.counter","version":"1.0.0","platform":"windows","architecture":"x86_64","abi_version":1,"protocol_version":1,"capabilities":["ui","messages","events"]}
+{"package_version":1,"entry":"bin/example.dll","id":"example.counter","name":"示例计数插件","author":"VChat Contributors","description":"演示消息和状态迁移","version":"1.0.0","platform":"windows","architecture":"x86_64","abi_version":1,"protocol_version":1,"capabilities":["ui","messages","events"]}
 ```
 
-`entry` 为包内 `bin/` 下相对路径。平台使用 Rust OS 名称（windows、linux、macos），架构使用 x86_64、aarch64 等 Rust 目标架构名。插件 ID 用 ASCII 字母、数字、点、下划线、连字符表示。打包工具校验清单、入口与包内路径，加载器验证 ZIP 完整性并限制解压规模。
+`name`、`author`、`description` 为兼容旧包的可选展示字段，省略时名称回退到 ID，作者和简介显示本地化占位文案。`version` 继续提供版本。`entry` 为包内 `bin/` 下相对路径。平台使用 Rust OS 名称（windows、linux、macos），架构使用 x86_64、aarch64 等 Rust 目标架构名。插件 ID 用 ASCII 字母、数字、点、下划线、连字符表示。打包工具校验清单、入口与包内路径，加载器验证 ZIP 完整性并限制解压规模。
 
 ```powershell
 cargo build --locked -p vchat-example-plugin -p vchat-echolive-config-plugin -p vchat-nana-dialogue-plugin
