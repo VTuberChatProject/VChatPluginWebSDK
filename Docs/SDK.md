@@ -89,6 +89,35 @@ save_state 输出 StateSnapshot（插件 ID、非零格式版本、状态字节�
 调用超过 5 秒、IPC 断开或插件崩溃时，宿主终止并回收进程，撤销该插件的 UI 与路由，用户通过设置手动重启。
 独立进程提供故障隔离；插件继续拥有当前用户的操作系统访问权限。
 
+## 插件输出卡片
+
+主界面顶栏的输出按钮打开居中模态浮窗，按插件名称分栏，以 Grid 展示插件声明的卡片。
+宿主展示启用且活动的内置插件，以及启用且在线的 HTTP 插件。
+每张卡片提供稳定 `id`、主标题 `title`、用途说明 `subtitle` 和零至两个 `actions`；
+卡片 ID 在插件内唯一，操作 ID 在卡片内唯一。标题、说明、操作 ID 和名称应为非空文本。
+
+HTTP 插件在 v2 `register` 请求中提供可选 `output_cards`，并声明 `ui` 能力：
+
+```json
+{"version":2,"id":"register","operation":"register","payload":{"id":"example.output","name":"示例输出","capabilities":["ui"],"output_cards":[{"id":"live","title":"Live","subtitle":"实时显示对话内容","actions":[{"id":"copy","label":"复制地址","kind":"copy_url","target":"https://example.com/live"},{"id":"open","label":"浏览器打开","kind":"open_url","target":"https://example.com/live"}]}]}}
+```
+
+内置插件通过 `ui.register` 的 `UiContribution.output_cards` 注册相同结构的 Protobuf `OutputCard`/`OutputAction`。
+`vchat_core` 提供共享 Rust 模型与校验，`vchat_plugin_api::output` 提供 `cards_to_proto` / `cards_from_proto` 转换。
+配置更新重新注册 UI 时应带上完整卡片列表。失败候选保留旧贡献，停用或运行失败撤销活动贡献。
+
+| `kind` | `target` | 行为 |
+| --- | --- | --- |
+| `copy_url` | 网页地址 | 复制解析后的完整地址 |
+| `open_url` | 网页地址 | 交由系统浏览器打开 |
+| `open_dialogue_window` | 空字符串或省略 | 打开 NanaDialogue 原生打字窗口，仅向 `builtin.nana-dialogue` 内置插件开放，需 `ui` 与 `frontend` 能力 |
+
+网页地址接受 HTTP/HTTPS 绝对地址或以单个 `/` 开头的宿主根路径，例如 `/Echo-Live/live.html`。
+两类插件的根路径都按当前 VChat 前端服务地址解析；HTTP 插件自有服务使用绝对地址。
+地址应包含有效主机且凭据为空，避免空白、反斜杠、`//` 网络路径与其他协议。
+HTTP 卡片声明跟随当前会话，更新列表通过断开并重新登记完成；宿主持久化启用和排序策略。
+省略卡片字段的既有 HTTP 注册与内置 Protobuf 消息继续兼容。
+
 ## 消息类型与暂停
 
 HTTP 插件使用 WebSocket 操作 `message-types.register`；
