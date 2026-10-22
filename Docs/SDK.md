@@ -118,6 +118,18 @@ HTTP 插件在 v2 `register` 请求中提供可选 `output_cards`，并声明 `u
 HTTP 卡片声明跟随当前会话，更新列表通过断开并重新登记完成；宿主持久化启用和排序策略。
 省略卡片字段的既有 HTTP 注册与内置 Protobuf 消息继续兼容。
 
+## VTypewriter 文件前端示例
+
+`Plugins/VTypewriter` 展示通过标准 `frontend`、`ui` 能力实现的本地文件输出插件。Windows 的 `builtin` 打包流程额外生成 `builtin.vtypewriter.vcplug`；先构建 `vchat-vtypewriter-plugin`，再运行下文的打包命令。插件连接用户自行运行的 VTypewriter 1.0，OBS 使用窗口采集。
+
+插件配置对象支持 `text_file_path`（绝对文件路径，省略时使用当前用户 `%APPDATA%\VTypewriter\VTypewriterText.txt`）和 `format`（`rich_text` / `plain_text`，默认 `rich_text`）。配置保存、校验失败回滚和重启恢复复用宿主事务。原版读取路径固定，路径覆盖用于兼容接收程序的实际位置；Unity 的 `Config.json` 由用户自行维护。
+
+`message` 使用标准投递信封 `{version:1,frontend_id,batch_id,message}`；剧本扩展字段为 `run_id`、`generation`。`clear` 接收 `{version:1,frontend_id,batch_id,message_id,run_id,generation}` 并发布空正文。插件只处理 `frontend_id = "builtin.vtypewriter"` 的有效文档和批次。候选实例创建、启动和快照迁移仅处理配置与注册；首次实际输出才创建文本目录。
+
+文件发布采用同目录临时文件、UTF-8 和目标不存在时的原子发布，已有文件等待消费者取走。等待空位与消费共用 3 秒期限，轮询间隔 25 毫秒。消费成功后普通消息通过 `frontend.receipt` 提交原 `message_id`、`batch_id` 及 `status:"completed"`，随后宿主开始阅读停留；此回执确认文件已被消费，动画结束时间由 Unity 决定。IO 错误或超时返回结构化插件错误，宿主将输出置为离线。超时清理验证本次文件身份，外部文件保持原有归属。
+
+富文本将基础样式转换为 TMP 的 `b`、`i`、`u`、`s`、`color`、`mark`、`size` 标签，五档字号为 60%、80%、100%、140%、200%。两种格式均通过 `noparse` 保护正文标签，注音降级为括号文本、图片降级为 `[图片]`，其余样式保留正文。Unity 启动会删除已有协议文件，使用时先启动原版、再发送；原控制器与插件采用单写入方使用约定。恢复时确认程序、路径和写入权限，再停用并重新启用插件。
+
 ## 消息类型与暂停
 
 HTTP 插件使用 WebSocket 操作 `message-types.register`；
@@ -174,7 +186,7 @@ resources/<网页、媒体、默认配置、主题等>
 `name`、`author`、`description` 为兼容旧包的可选展示字段，省略时名称回退到 ID，作者和简介显示本地化占位文案。`version` 继续提供版本。`entry` 为包内 `bin/` 下相对路径。平台使用 Rust OS 名称（windows、linux、macos），架构使用 x86_64、aarch64 等 Rust 目标架构名。插件 ID 用 ASCII 字母、数字、点、下划线、连字符表示。打包工具校验清单、入口与包内路径，加载器验证 ZIP 完整性并限制解压规模。
 
 ```powershell
-cargo build --locked -p vchat-example-plugin -p vchat-echolive-config-plugin -p vchat-nana-dialogue-plugin
+cargo build --locked -p vchat-example-plugin -p vchat-echolive-config-plugin -p vchat-nana-dialogue-plugin -p vchat-vtypewriter-plugin
 cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- builtin . target/debug target/debug
 cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- pack target/plugin-stage target/example.vcplug
 ```
