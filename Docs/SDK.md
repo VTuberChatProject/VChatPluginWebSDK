@@ -194,10 +194,12 @@ cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- pack targ
 插件在 `create` 中通过 `HostRequest.service = "runtime.paths"` 查询：
 
 ```json
-{"package_root":"/当前代次包目录","resources_root":"/当前代次包目录/resources","data_root":"/插件持久化数据目录"}
+{"package_root":"/当前代次包目录","resources_root":"/当前代次包目录/resources","data_root":"/插件持久化数据目录","assets_root":"/应用数据目录/Assets"}
 ```
 
 Rust 使用 `unsafe { vchat_plugin_api::runtime::runtime_paths(&host) }`；C/C++ 使用现有 HostApi 回调解析同一 JSON。资源路径随代次变化，配置与可写数据独立持久化。每个进程只加载对应包内动态库；Linux 原生依赖使用 `$ORIGIN` 或 worker 搜索环境，macOS 使用 `@loader_path/@rpath`，Windows 依赖与入口放在同一目录。
+
+`assets_root` 是可选的共享可写资源目录，随 `--data-dir` 移动；旧宿主省略此字段。EchoLive 的下载与 ZIP 导入写入其中的 `Echo-Live/<归档SHA256>/`，用户选择的外部文件夹保持只读引用。资源准备、状态和取消操作分别为 `echolive.resources.prepare/status/cancel`，采用版本 1 JSON，每个请求携带 `generation` 并与 `HostApi.generation` 一致；准备返回任务身份，查询与取消携带 `id`，查询返回阶段、进度、结果或错误。候选设置先调用纯校验的 `config.validate`，数据库提交成功后调用 `config.changed` 激活资源；失败保留已确认资源或执行补偿回滚。
 
 应用导入后按插件 ID 与包 SHA-256 保存受控副本。更新采用候选进程、状态快照迁移和暂存宿主事件；数据库保存成功后提交活动代次，失败恢复旧实例。成功更新关闭该插件原有 WebSocket 连接，客户端重新连接后重新触发 open。
 
