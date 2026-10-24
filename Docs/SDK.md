@@ -1,5 +1,11 @@
 # 插件 SDK
 
+## 文档状态与目标设计
+
+本页说明当前实现：外部插件使用 `/api/v2/ws` 文本 JSON，内部插件使用 ABI 1 与 Protobuf，并在独立 worker 中运行。
+完整目标规范见 [插件系统与 SDK 设计](../../Docs/PluginSystemDesign.md)：外部协议升级为 v3 Protobuf，worker 与内部插件改用结构化 C ABI 2，开发用 VCPluginInterface 动态库独立发行，主程序内嵌同源接口实现。
+目标设计采用宿主注入函数表，插件包只携带插件自身依赖；主程序与 worker 保留私有 Protobuf IPC。新接口、SDK 构建和版本迁移在后续代码改造中实现，本页以下命令和示例继续对应当前版本。
+
 ## HTTP 插件 WebSocket 接入
 
 在「设置 → 拓展 → 基础设置」启用接口并复制统一令牌。默认连接地址为
