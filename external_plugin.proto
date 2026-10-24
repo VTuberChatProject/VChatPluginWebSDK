@@ -1,0 +1,68 @@
+// 外部插件 v3 二进制消息契约。
+syntax = "proto3";
+package vchat.external.v3;
+message Envelope {
+  uint32 major = 1;
+  uint32 minor = 2;
+  string request_id = 3;
+  oneof body { Request request = 10; Response response = 11; Event event = 12; }
+}
+message Request {
+  oneof body {
+    Register register = 1;
+    RegisterMessageTypes message_types_register = 2;
+    MessageInput messages_incoming = 3;
+    MessageInput messages_send = 4;
+    TransformRequest transform = 5;
+  }
+}
+message Response {
+  oneof body {
+    RegisterResult register = 1;
+    Empty message_types_register = 2;
+    Message accepted_message = 3;
+    TransformResult transform = 4;
+    Error error = 15;
+  }
+}
+message Error { string code = 1; string message = 2; bool retryable = 3; }
+message Empty {}
+message Register {
+  string id = 1; string name = 2; string author = 3; string version = 4;
+  string description = 5; optional string config_url = 6; repeated string capabilities = 7;
+  repeated OutputCard output_cards = 8; optional string last_event_id = 9;
+  uint32 min_minor = 10; uint32 max_minor = 11;
+}
+message RegisterResult { string plugin_id = 1; string generation = 2; uint32 minor = 3; }
+message RegisterMessageTypes { repeated MessageTypeDefinition types = 1; }
+message MessageTypeDefinition { string id = 1; string label = 2; }
+message MessageType { string plugin_kind = 1; string plugin_id = 2; string type_id = 3; }
+message MessageInput {
+  string username = 1; Document document = 2; optional string source_message_id = 3;
+  optional int64 source_time = 4; optional string type_id = 5;
+  optional string avatar_url = 6; repeated string origin_ids = 7;
+}
+message Message {
+  string id = 1; string source_id = 2; optional string source_message_id = 3;
+  int64 received_at_ms = 4; uint64 sequence = 5; Document document = 6;
+  optional int64 source_time = 7; string username = 8; string status = 9;
+  repeated string origin_ids = 10; MessageType message_type = 11; optional string avatar_url = 12;
+}
+message Document { uint32 version = 1; uint64 revision = 2; repeated Paragraph paragraphs = 3; }
+message Paragraph { repeated Segment segments = 1; }
+message Segment {
+  string text = 1; TextStyle style = 2; optional string ruby = 3;
+  optional uint32 speed = 4; optional uint32 pause = 5; Image image = 6;
+  optional string class = 7; string extra_json = 8;
+}
+message TextStyle {
+  bool bold = 1; bool italic = 2; bool underline = 3; bool strikethrough = 4;
+  optional string color = 5; optional string background_color = 6;
+  optional string size = 7; string extra_json = 8;
+}
+message Image { string source = 1; float width = 2; float height = 3; }
+message TransformRequest { Message message = 1; Document document = 2; }
+message TransformResult { Document document = 1; }
+message Event { string event_id = 1; string kind = 2; Message message = 3; string extra_json = 4; }
+message OutputCard { string id = 1; string title = 2; string subtitle = 3; repeated OutputAction actions = 4; }
+message OutputAction { string id = 1; string label = 2; string kind = 3; string target = 4; }

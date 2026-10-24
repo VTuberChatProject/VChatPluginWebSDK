@@ -1,231 +1,131 @@
+<!-- ABI 2 与外部协议 v3 的开发、验证及分发说明。 -->
 # 插件 SDK
 
-## 文档状态与目标设计
+完整契约见 [插件系统设计](../../Docs/PluginSystemDesign.md)。外部插件通过 WebSocket Protobuf v3 接入，内部插件通过结构化 C ABI 2 接入独立 worker。
+主程序内嵌与开发动态库同源的接口实现。插件发行通过宿主注入的函数表工作，SDK 独立构建和发布。
+版本分别管理：外部协议 v3、C ABI 2、私有 IPC 2、内部业务模型 1。`PluginRequest.protocol_version` 对应 `BUSINESS_MODEL_VERSION=1`（`PROTOCOL_VERSION` 为其别名），C 使用 `VC_MODEL_VERSION`；插件加载兼容性依据清单 ABI 与平台。
 
-本页说明当前实现：外部插件使用 `/api/v2/ws` 文本 JSON，内部插件使用 ABI 1 与 Protobuf，并在独立 worker 中运行。
-完整目标规范见 [插件系统与 SDK 设计](../../Docs/PluginSystemDesign.md)：外部协议升级为 v3 Protobuf，worker 与内部插件改用结构化 C ABI 2，开发用 VCPluginInterface 动态库独立发行，主程序内嵌同源接口实现。
-目标设计采用宿主注入函数表，插件包只携带插件自身依赖；主程序与 worker 保留私有 Protobuf IPC。新接口、SDK 构建和版本迁移在后续代码改造中实现，本页以下命令和示例继续对应当前版本。
+## 外部插件
 
-## HTTP 插件 WebSocket 接入
-
-在「设置 → 拓展 → 基础设置」启用接口并复制统一令牌。默认连接地址为
-`ws://127.0.0.1:38601/api/v2/ws`，升级请求携带 `Authorization: Bearer <统一令牌>`。
-监听 IP 可设置为局域网地址或 `0.0.0.0`，连接时使用宿主设备实际 IP。服务开关即时生效，
-保存地址或轮换令牌后现有连接结束；插件使用新设置重新登记。端口 `0` 自动分配实际端口。
-
-双向 JSON 请求统一使用 `{version:2,id,operation,payload}`，`id` 在本连接的待决请求中唯一。
-响应为 `{version:2,id,result}` 或 `{version:2,id,error:{code:"request_failed",message}}`。
-升级后的首条消息须在 15 秒内发送 `register`，例如：
-
-```json
-{"version":2,"id":"register-1","operation":"register","payload":{"id":"example.remote","name":"远程插件","author":"Example","version":"1.0.0","description":"投递与处理远程消息","config_url":"http://127.0.0.1:39000/settings","capabilities":["messages","events","transform"]}}
-```
-
-登记成功返回 `result:{plugin_id,generation}`。名称、作者、版本、简介、配置网页和能力可省略；
-配置网页支持 HTTP/HTTPS。重复在线 ID 返回冲突错误，原连接继续服务。
-在线资料用于「插件列表」卡片；停用后连接保留，业务请求、事件接收和转换暂停，重连恢复宿主按 ID 保存的启用状态。
-
-| 操作 | 方向 | payload / result |
-| --- | --- | --- |
-| `message-types.register` | 插件 → 宿主 | payload 为下文消息类型声明；需要 `messages` 能力 |
-| `messages.incoming` | 插件 → 宿主 | payload 为消息 JSON，按来源自动转发策略入队；result 为接收的消息 |
-| `messages.send` | 插件 → 宿主 | payload 为同一消息 JSON，直接入队；result 为接收的消息 |
-| `event` | 宿主 → 插件 | payload 为事件对象，包含稳定 `event_id`、`kind`、`message`；需要 `events` 能力，事件无需响应 |
-| `transform` | 宿主 → 插件 | payload 为 `{version:2,message,document}`；返回 `result:{version:2,document}`；需要 `transform` 能力 |
-
-消息 JSON 包含 `username`、`document`，可选 `source_message_id`、`source_time`、`message_type`、
-`avatar_url`、`origin_ids`。`source_id` 可省略，宿主使用登记的插件 ID；显式填写时须与插件 ID 一致。
-宿主在应用队列边界执行文档校验和消息类型归属校验，错误通过同一请求 ID 返回。
-
-```json
-{"version":2,"id":"message-1","operation":"messages.incoming","payload":{"source_message_id":"upstream-1","username":"观众","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"你好","style":{}}]}]}}}
-```
-
-事件按 FIFO 投递，宿主保留最近 1000 条；插件持久化最后处理的 `event_id`，重连时在 `register.payload`
-中填写 `last_event_id`，宿主回放该 ID 之后的事件。历史已过期时登记返回错误，插件须重新同步业务状态。
-省略 `last_event_id` 时从实时事件开始。消费落后触发断连时同样使用此机制恢复。
-转换与 InternalPlugin 按处理顺序串行执行，单次超时 3 秒；超时、断线、错误响应及无效文档进入转换失败处理，
-迟到响应按连接代次丢弃。WebSocket 控制帧每 15 秒发送 Ping，45 秒缺少有效响应时回收连接；
-插件客户端应处理 Ping/Pong，并在断连后重新登记。关闭连接时宿主撤销该代次的在线资料和能力声明，保留历史与类型暂停策略。
-
-## InternalPlugin ABI
-
-ABI 主版本为 1，协议主版本为 1。Rust 使用 `vchat-plugin-api`，C/C++ 使用
-`internal_plugin.h` 和 `internal_plugin.proto`；生成器由 `protoc-bin-vendored = 3.2.0`
-锁定为 Protobuf 31.1。字段编号保留兼容性，新增 ABI 表字段通过 `struct_size` 协商。
-
-动态库导出 `vchat_internal_plugin_get_api`，worker 复制函数表。`create` 接收稳定的
-HostApi 地址与 JSON 配置；输出独立实例地址。每个插件代次在独立 worker 进程执行，生命周期及 invoke 串行运行。宿主服务通过内部 IPC 同步转发到主进程。
-请求缓冲区在本次调用内有效。插件通过 write 回调复制响应，宿主释放宿主缓冲区，插件释放插件对象。
-各 ABI 函数捕获 panic/异常，禁止异常穿过 ABI 边界。单响应最大 16 MiB。
-
-invoke 接收 PluginRequest 并返回 PluginResponse。`transform` 的 payload_json 保存共享
-消息 JSON；文档采用 Paragraph/Segment/TextStyle/Image 结构化字段，extra_json 保留未知扩展；
-`ui.command` 同时携带文档、修订号和选区，返回 edit 时宿主核对 expected_revision。
-`ui.settings` 接收配置字段。UI 字段 kind 使用 text、number、switch、enum、color。
-`transform` 和 `event` 同时携带结构化 message（包含 document 与消息来源、身份、时序、状态、message_type、avatar_url）；
-`config.changed` 通知配置变化，payload_json 保留版本扩展入口。转换结果优先使用 edit.replacement，
-payload_json 可返回共享消息 JSON。Rust 用 document_to_proto/document_from_proto/message_to_proto 转换。
-
-HostApi.invoke 接收 HostRequest：runtime.paths 返回本代次包根目录、资源目录与持久化数据目录；log 记录日志；config 写回 JSON 配置；config.set 更新并投递配置变更事件；message.post 投递消息；message.types.register 注册消息类型；
-event.subscribe 注册订阅；ui.register 注册 UiContribution；frontend.register 声明一个可接收消息的前端；frontend.message 投递前端消息；frontend.receipt 提交前端回执；
-frontend.clear 清空当前前端显示，与 frontend.message、frontend.receipt 共用 frontend 权限。
-ui.window.* 请求宿主创建、更新或关闭 NanaUI 窗口。`web.route.register` 使用 `web` 权限注册整组 HTTP/WS 路由，重复或重叠的 method/path 会被拒绝，插件停用时路由与连接一并清理。示例：
-
-```json
-{"version":1,"routes":[{"kind":"http","method":"GET","path":"/example/*","operation":"example.http"},{"kind":"websocket","method":"GET","path":"/example-ws","operation":"example.ws"}]}
-```
-
-HTTP 路由调用插件的 operation，payload 包含 version、method、path、query、headers 和 byte-array body；PluginResponse 的 status、content_type、no_store、body 生成 HTTP 响应。WebSocket 由 WebService 建立和关闭，插件依次收到 `<operation>.open`、`<operation>.message`、`<operation>.close` 调用，payload 带 connection_id、path、query、preview 和 data。候选插件的 `start` 阶段同步校验路由冲突，校验失败会回滚热更新；成功路由在代次提交时切换。`websocket.send` 按 connection_id 单播，`websocket.broadcast` 向本插件频道广播原始 JSON；广播消息不会进入其他插件频道。两者 payload 使用 `{ "connection_id": "...", "data": ..., "preview": false }`，广播可省略 connection_id。
-
-权限分别使用 messages、events、ui、frontend、web；所有新增服务的 payload_json 必须是有效 JSON，服务事件仍按插件代次排队。
-回调线程安全，宿主将事件入队。插件必须复制暂存的请求。HostContext 和 generation 随实例固定。
-
-剧本投递的 `message` 操作在既有 `frontend_id`、`batch_id`、`message` 外携带 `run_id` 和递增的 `generation`。宿主按批次立即替换显示，NanaDialogue 的完成回执由 UI 实际逐字呈现结束后提交。`clear` 操作携带 `frontend_id`、`message_id`、`batch_id`、`run_id`、`generation`，插件通过 `frontend.clear` 转交宿主。宿主过滤已退休批次的显示更新、完成回执和异步失败；普通消息继续沿用原有投递格式。
-
-quiesce 成功表示插件的后台线程、任务和宿主回调全部结束。resume 重新启用实例。
-save_state 输出 StateSnapshot（插件 ID、非零格式版本、状态字节），restore_state 负责版本迁移。
-热更新先创建候选进程并预加载包内库，暂停旧实例，导出快照，在暂存宿主上下文中恢复候选实例。
-候选 start 成功后持久化新包引用，再切换活动代次和 UI；失败回收候选并 resume 旧实例。
-暂存实例的消息投递按顺序缓存，提交后释放；失败候选事件丢弃。
-消息类型注册同样进入代次事务队列，声明先于该类型消息投递，候选失败时丢弃注册。
-宿主 `reload` 沿用配置；`reload_with_config(id, manifest, path, values)` 将新配置送入候选实例，
-迁移成功时提交配置，失败时保留原配置。配置、代次和事件暂存共用事务锁。
-新实例提交后清理旧进程，清理失败时强制结束并记录日志。
-调用超过 5 秒、IPC 断开或插件崩溃时，宿主终止并回收进程，撤销该插件的 UI 与路由，用户通过设置手动重启。
-独立进程提供故障隔离；插件继续拥有当前用户的操作系统访问权限。
-
-## 插件输出卡片
-
-主界面顶栏的输出按钮打开居中模态浮窗，按插件名称分栏，以 Grid 展示插件声明的卡片。
-宿主展示启用且活动的内置插件，以及启用且在线的 HTTP 插件。
-每张卡片提供稳定 `id`、主标题 `title`、用途说明 `subtitle` 和零至两个 `actions`；
-卡片 ID 在插件内唯一，操作 ID 在卡片内唯一。标题、说明、操作 ID 和名称应为非空文本。
-
-HTTP 插件在 v2 `register` 请求中提供可选 `output_cards`，并声明 `ui` 能力：
-
-```json
-{"version":2,"id":"register","operation":"register","payload":{"id":"example.output","name":"示例输出","capabilities":["ui"],"output_cards":[{"id":"live","title":"Live","subtitle":"实时显示对话内容","actions":[{"id":"copy","label":"复制地址","kind":"copy_url","target":"https://example.com/live"},{"id":"open","label":"浏览器打开","kind":"open_url","target":"https://example.com/live"}]}]}}
-```
-
-内置插件通过 `ui.register` 的 `UiContribution.output_cards` 注册相同结构的 Protobuf `OutputCard`/`OutputAction`。
-`vchat_core` 提供共享 Rust 模型与校验，`vchat_plugin_api::output` 提供 `cards_to_proto` / `cards_from_proto` 转换。
-配置更新重新注册 UI 时应带上完整卡片列表。失败候选保留旧贡献，停用或运行失败撤销活动贡献。
-
-| `kind` | `target` | 行为 |
-| --- | --- | --- |
-| `copy_url` | 网页地址 | 复制解析后的完整地址 |
-| `open_url` | 网页地址 | 交由系统浏览器打开 |
-| `open_dialogue_window` | 空字符串或省略 | 打开 NanaDialogue 原生打字窗口，仅向 `builtin.nana-dialogue` 内置插件开放，需 `ui` 与 `frontend` 能力 |
-
-网页地址接受 HTTP/HTTPS 绝对地址或以单个 `/` 开头的宿主根路径，例如 `/Echo-Live/live.html`。
-两类插件的根路径都按当前 VChat 前端服务地址解析；HTTP 插件自有服务使用绝对地址。
-地址应包含有效主机且凭据为空，避免空白、反斜杠、`//` 网络路径与其他协议。
-HTTP 卡片声明跟随当前会话，更新列表通过断开并重新登记完成；宿主持久化启用和排序策略。
-省略卡片字段的既有 HTTP 注册与内置 Protobuf 消息继续兼容。
-
-## VTypewriter 文件前端示例
-
-`Plugins/VTypewriter` 展示通过标准 `frontend`、`ui` 能力实现的本地文件输出插件。Windows 的 `builtin` 打包流程额外生成 `builtin.vtypewriter.vcplug`；先构建 `vchat-vtypewriter-plugin`，再运行下文的打包命令。插件连接用户自行运行的 VTypewriter 1.0，OBS 使用窗口采集。
-
-插件配置对象支持 `text_file_path`（绝对文件路径，省略时使用当前用户 `%APPDATA%\VTypewriter\VTypewriterText.txt`）和 `format`（`rich_text` / `plain_text`，默认 `rich_text`）。配置保存、校验失败回滚和重启恢复复用宿主事务。原版读取路径固定，路径覆盖用于兼容接收程序的实际位置；Unity 的 `Config.json` 由用户自行维护。
-
-`message` 使用标准投递信封 `{version:1,frontend_id,batch_id,message}`；剧本扩展字段为 `run_id`、`generation`。`clear` 接收 `{version:1,frontend_id,batch_id,message_id,run_id,generation}` 并发布空正文。插件只处理 `frontend_id = "builtin.vtypewriter"` 的有效文档和批次。候选实例创建、启动和快照迁移仅处理配置与注册；首次实际输出才创建文本目录。
-
-文件发布采用同目录临时文件、UTF-8 和目标不存在时的原子发布，已有文件等待消费者取走。等待空位与消费共用 3 秒期限，轮询间隔 25 毫秒。消费成功后普通消息通过 `frontend.receipt` 提交原 `message_id`、`batch_id` 及 `status:"completed"`，随后宿主开始阅读停留；此回执确认文件已被消费，动画结束时间由 Unity 决定。IO 错误或超时返回结构化插件错误，宿主将输出置为离线。超时清理验证本次文件身份，外部文件保持原有归属。
-
-富文本将基础样式转换为 TMP 的 `b`、`i`、`u`、`s`、`color`、`mark`、`size` 标签，五档字号为 60%、80%、100%、140%、200%。两种格式均通过 `noparse` 保护正文标签，注音降级为括号文本、图片降级为 `[图片]`，其余样式保留正文。Unity 启动会删除已有协议文件，使用时先启动原版、再发送；原控制器与插件采用单写入方使用约定。恢复时确认程序、路径和写入权限，再停用并重新启用插件。
-
-## 消息类型与暂停
-
-HTTP 插件使用 WebSocket 操作 `message-types.register`；
-InternalPlugin 使用 `HostRequest.service = "message.types.register"`，将相同 JSON 写入 `payload_json`。
-两者需要 `messages` 权限，并以完整列表替换当前插件声明；空列表移除声明，既有积压消息和暂停设置继续保留。
-版本必须为 1，ID 和中文名称必须非空，ID 在同一插件内唯一且应长期稳定。
-
-```json
-{"version":1,"types":[{"id":"remote","label":"远程消息"},{"id":"danmaku","label":"弹幕消息"}]}
-```
-
-声明成功后，在 `message.post`、WebSocket `messages.incoming`/`messages.send` 的消息 JSON 中填写可选 `message_type`：
-
-```json
-{"source_id":"internal:example.counter","source_message_id":"1","message_type":"remote","username":"示例插件","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"远程消息","style":{}}]}]}}
-```
-
-提交只填写插件内类型 ID。宿主从凭据或 HostContext 取得插件身份，生成
-`message_type: {plugin_kind, plugin_id, type_id}`，并用于共享消息、插件事件和 Protobuf Message 的字段 11。
-显式提交未声明的 ID 会返回错误；旧插件省略字段时归入该插件的“未分类消息”。
-InternalPlugin 的宿主回调同步校验声明：未声明 ID 返回 `STATUS_ERROR`；注册成功后立即可按该 ID 投递。
-每个实例持有独立类型缓存，候选完整替换声明后仍保留事务隔离，迁移失败时旧实例继续使用原声明。
-宿主启动前通过 `InternalPluginManager::seed_message_types(id, types)` 注入持久化声明，旧声明即可在首次投递时使用；
-热更新自动复制活动实例声明，之后由候选注册请求更新自己的缓存。
-类型暂停继续接收和转换消息，调度跳过该类型；解除暂停后积压消息按原始顺序参与播放。
-Rust 示例在启用启动或后台投递时先注册 `remote`，再投递相应消息。
-
-## 接收者头像
-
-WebSocket `messages.incoming`/`messages.send` 和 InternalPlugin `message.post` 的消息 JSON 支持可选 `avatar_url`：
-
-```json
-{"source_id":"internal:example.counter","username":"示例插件","avatar_url":"https://example.com/avatar.png","document":{"version":1,"revision":0,"paragraphs":[{"segments":[{"text":"带头像的消息","style":{}}]}]}}
-```
-
-链接支持 HTTP/HTTPS，随消息保存并保留至转发、重试、插件事件和转换请求。Protobuf `Message` 追加可选字段 `avatar_url = 12`，省略字段的既有插件与历史记录继续兼容。客户端在后台加载图片，同一链接共享本次会话缓存，图片缺失、加载中或失败时显示姓名首个字素。建议提供直接图片链接或同源重定向；下载上限为 8 MiB，超时 5 秒。GIF 显示首帧缩略图。自己的头像由设置页的本地图片选择器管理。
-
-## `.vcplug` 打包与资源
-
-`.vcplug` 是标准 ZIP，单包对应一个平台与架构，布局为：
+在「设置 → 拓展 → 基础设置」启用接口并复制统一令牌。默认地址为 `ws://127.0.0.1:38601/api/v3/ws`，升级请求携带 `Authorization: Bearer <令牌>`。
+监听设置、接口开关和令牌轮换沿用应用设置；变更后重新连接登记。协议来源为 [external_plugin.proto](../../Adapter/HttpPlugin/external_plugin.proto)。
+每个 WebSocket Binary 消息承载一个 Envelope。首条请求在 15 秒内发送 register，信封 major=3、minor=0，登记中 min_minor/max_minor 声明支持范围，当前为 0。
 
 ```text
-manifest.json
-bin/<入口动态库及配套原生依赖>
-resources/<网页、媒体、默认配置、主题等>
+major: 3 minor: 0 request_id: "register-1"
+request { register {
+  id: "example.remote" name: "远程插件" version: "2.0.0"
+  capabilities: "messages" capabilities: "events" capabilities: "transform"
+  min_minor: 0 max_minor: 0
+} }
 ```
 
-清单示例（入口文件名按目标平台生成）：
+上例为 Protobuf TextFormat 的可读表示；线上发送生成类型编码后的字节。Response 使用相同 request_id，Event 使用稳定 event_id 和空 request_id。
 
-```json
-{"package_version":1,"entry":"bin/example.dll","id":"example.counter","name":"示例计数插件","author":"VChat Contributors","description":"演示消息和状态迁移","version":"1.0.0","platform":"windows","architecture":"x86_64","abi_version":1,"protocol_version":1,"capabilities":["ui","messages","events"]}
-```
+| 操作 | 方向与权限 | 数据 |
+| --- | --- | --- |
+| register | 插件 → 宿主 | 身份资料、版本范围、能力、可选配置网页/输出卡片/游标；返回身份、代次和版本 |
+| message-types.register | 插件 → 宿主，messages | 稳定 ID 和名称的完整列表；空列表移除声明 |
+| messages.incoming | 插件 → 宿主，messages | 强类型 MessageInput，按来源自动转发策略入队 |
+| messages.send | 插件 → 宿主，messages | 强类型 MessageInput，直接入队 |
+| event | 宿主 → 插件，events | 稳定事件 ID、种类、完整 Message 和专用扩展 |
+| transform | 宿主 → 插件，transform | Message 与当前 Document，返回替换 Document |
 
-`name`、`author`、`description` 为兼容旧包的可选展示字段，省略时名称回退到 ID，作者和简介显示本地化占位文案。`version` 继续提供版本。`entry` 为包内 `bin/` 下相对路径。平台使用 Rust OS 名称（windows、linux、macos），架构使用 x86_64、aarch64 等 Rust 目标架构名。插件 ID 用 ASCII 字母、数字、点、下划线、连字符表示。打包工具校验清单、入口与包内路径，加载器验证 ZIP 完整性并限制解压规模。
+MessageInput 提交文档、用户名、可选来源消息 ID/时间、插件内 type_id、头像 URL 和 origin_ids；宿主生成可信来源与消息身份。
+文档的段落、片段、样式、图片、注音、速度与停顿均为结构化字段，extra_json 用于扩展。头像沿用 HTTP/HTTPS 校验和宿主缓存。
+类型先注册再投递；类型暂停仍接收和排队，解除后按原顺序调度。输出卡片最多两个操作，随会话登记，根路径按当前 WebService 地址解析。
+事件 FIFO，保留最近 1000 条；重连提交 last_event_id，历史过期返回 history_expired。Ping 间隔 15 秒，45 秒失联回收。
+写入与外部转换限 3 秒，登记和应用处理限 15 秒，单消息最大 4 MiB。同方向待决 request_id 唯一，迟到响应丢弃。
+
+业务边界额外读取至多 1 字节以识别超限，发送 Close 1009 并限时 1 秒等待回执。更大帧由传输硬上限在分配前拒绝；底层错误使读取流终止，宿主尽力发送 1009 后立即回收连接、代次及待决请求，客户端也可能观察到 TCP reset 或 EOF。
+
+Rust 客户端可使用 `vchat_http_plugin::wire::proto` 与 encode/decode；encode_request/encode_response/decode_value 提供宿主模型转换。
+Python 示例使用标准生成代码和 websockets：
 
 ```powershell
-cargo build --locked -p vchat-example-plugin -p vchat-echolive-config-plugin -p vchat-nana-dialogue-plugin -p vchat-vtypewriter-plugin
-cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- builtin . target/debug target/debug
+python -m pip install protobuf grpcio-tools websockets
+python -m grpc_tools.protoc -I Adapter/HttpPlugin --python_out=Core/Tools Adapter/HttpPlugin/external_plugin.proto
+python Core/Tools/sdk-client.py --token <令牌>
+```
+
+独立 SDK 中协议与示例位于根目录，生成参数改用 `-I . --python_out=. external_plugin.proto`。
+C++ 外部示例 sdk-client.cpp 依赖 Boost.Beast 和生成代码，参数为 `<host> <port> <token>`。
+
+## 内部 C ABI
+
+公共头文件为 VCPluginInterface.h，ABI 主版本为 2。插件导出 vchat_internal_plugin_get_api，返回稳定只读 PluginApi 表。
+worker 校验版本、结构大小和函数表，向 create 注入实例级 HostApi。宿主服务通过该表转发到主程序。
+Rust 使用 vchat-plugin-api 的 abi/sdk 模块，默认构建包含业务模型及 C ABI 封装，Protobuf 编解码由宿主启用 host-protocol 特性。
+proto 模块保留拥有型业务模型命名，默认构建通过结构化视图交换这些数据。
+
+| SDK 方法 | 用途 |
+| --- | --- |
+| sdk::read_request / read_host_request | 深拷贝结构化输入，检查版本、长度及嵌套预算 |
+| sdk::with_request / with_host_request | 在同步闭包期间保持嵌套视图有效 |
+| sdk::write_response / write_snapshot | 同步向回复 sink 复制结果或快照 |
+| sdk::call_host | 调用注入表并复制宿主响应 |
+| runtime::runtime_paths | 读取当前包、资源、持久化数据与共享 Assets 目录 |
+
+ABI 使用固定宽度整数、自然对齐、UTF-8 字符串、带布局信息的集合和不透明上下文。输入借用到函数返回，回复由 sink 同步深拷贝。
+各侧管理各自内存，插件对象由 destroy 释放。合法带 sink 调用恰好回复一次；状态码和函数返回值传播失败。
+调用总量上限 16 MiB，深度上限 64。panic/异常在插件内部捕获；生命周期与 invoke 串行，后台线程可调用宿主。
+标准消息、文档、UI 与服务数据通过 C 结构传递，配置、表单 schema 和自定义操作保留用途明确的 JSON。
+宿主权限为 messages、events、ui、frontend、web；runtime.paths/log 面向全部实例。现有消息类型、前端、窗口与 Web 路由服务继续提供。
+编辑提交检查 expected_revision，路由整组校验冲突，剧本回执保留 run_id/batch_id/message_id/generation，过滤退休批次。
+
+## SDK 构建与调试
+
+```powershell
+# Unix 使用 bash Core/Tools/package-sdk.sh
+./Core/Tools/package-sdk.ps1
+cargo build --locked --release -p vchat-plugin-api --features sdk-dev
+cargo build --locked -p vchat-example-plugin
+cmake -S Plugins -B target/cpp-plugin -DVCHAT_SDK=<头文件目录>
+cmake --build target/cpp-plugin --config Release
+```
+
+SDK 输出在 target/dist/VCPluginSDK-<os>-<arch>/，包含头文件、开发库、可独立构建的源码、协议、示例和测试宿主。
+开发库为 VCPluginInterface.dll、libVCPluginInterface.so 或 libVCPluginInterface.dylib，与主程序静态编译的接口实现同源。
+测试宿主显式装载开发库并解析导出；导出接口提供版本查询、创建及销毁宿主，由调用方注入后端。
+最小测试宿主使用无需业务服务即可启动的 C++ 示例，验证真实动态加载与 create/start/quiesce/save/resume/destroy：
+
+```powershell
+python Core/Tools/sdk-host.py --library <SDK目录>/VCPluginInterface.dll --plugin <C++示例动态库>
+```
+
+业务回调、状态迁移及隔离由真实 worker 集成测试覆盖。正式插件仅使用头文件或静态封装，并通过注入函数表取得接口。
+
+## 插件包与生命周期
+
+.vcplug 为 ZIP，包含 manifest.json、bin/ 下入口与自身原生依赖、resources/ 下资源。清单版本为 2，ABI 为 2：
+
+```json
+{"package_version":2,"entry":"bin/example.dll","id":"example.counter","name":"示例计数插件","author":"VChat Contributors","description":"消息与状态迁移示例","version":"2.0.0","platform":"windows","architecture":"x86_64","abi_version":2,"capabilities":["ui","messages","events"]}
+```
+
+打包检查入口、平台、架构、路径、压缩内容与原生依赖，拒绝携带或依赖 VCPluginInterface 开发库。
+Linux 原生依赖使用 $ORIGIN，macOS 使用 @loader_path/@rpath，Windows 放在同一 bin/。
+
+```powershell
 cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- pack target/plugin-stage target/example.vcplug
+cargo build --locked -p vchat-echolive-config-plugin -p vchat-nana-dialogue-plugin -p vchat-vtypewriter-plugin
+cargo run --locked -p vchat-internal-plugin --bin vchat-plugin-pack -- builtin . target/debug target/debug
 ```
 
-插件在 `create` 中通过 `HostRequest.service = "runtime.paths"` 查询：
+每代独立解压并运行，data_root 长期保留，resources_root 随代次切换，assets_root 随 data-dir 移动。
+更新先创建候选、暂停旧实例、导出/迁移快照并启动候选。消息、类型、UI、前端与路由暂存，持久化提交成功后切换代次。
+失败时丢弃候选并恢复旧实例；quiesce 排空后台线程、任务与回调。5 秒超时、IPC 断开或崩溃回收对应 worker，设置页可手动重启。
+候选文件/网络副作用由插件负责；准备阶段校验与注册，实际输出留到活动业务调用。
 
-```json
-{"package_root":"/当前代次包目录","resources_root":"/当前代次包目录/resources","data_root":"/插件持久化数据目录","assets_root":"/应用数据目录/Assets"}
-```
+## 迁移与验证
 
-Rust 使用 `unsafe { vchat_plugin_api::runtime::runtime_paths(&host) }`；C/C++ 使用现有 HostApi 回调解析同一 JSON。资源路径随代次变化，配置与可写数据独立持久化。每个进程只加载对应包内动态库；Linux 原生依赖使用 `$ORIGIN` 或 worker 搜索环境，macOS 使用 `@loader_path/@rpath`，Windows 依赖与入口放在同一目录。
-
-`assets_root` 是可选的共享可写资源目录，随 `--data-dir` 移动；旧宿主省略此字段。EchoLive 的下载与 ZIP 导入写入其中的 `Echo-Live/<归档SHA256>/`，用户选择的外部文件夹保持只读引用。资源准备、状态和取消操作分别为 `echolive.resources.prepare/status/cancel`，采用版本 1 JSON，每个请求携带 `generation` 并与 `HostApi.generation` 一致；准备返回任务身份，查询与取消携带 `id`，查询返回阶段、进度、结果或错误。候选设置先调用纯校验的 `config.validate`，数据库提交成功后调用 `config.changed` 激活资源；失败保留已确认资源或执行补偿回滚。
-
-应用导入后按插件 ID 与包 SHA-256 保存受控副本。更新采用候选进程、状态快照迁移和暂存宿主事件；数据库保存成功后提交活动代次，失败恢复旧实例。成功更新关闭该插件原有 WebSocket 连接，客户端重新连接后重新触发 open。
-
-C++ 示例安装 Protobuf 31.1 后运行 `cmake -S Plugins -B target/cpp-plugin` 并构建。指定 `-DCMAKE_PREFIX_PATH=<Protobuf31.1安装目录>`、`-DVCHAT_PROTOC=<protoc31.1可执行文件>`；Windows 静态 Protobuf 使用 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`。将产出的库放入 `bin/`，使用对应 `entry` 生成插件包。
-
-## 已验证的命令
+外部 JSON v2 客户端更新到 v3 路径、Binary 与强类型字段。内部 ABI 1 插件升级 SDK、签名和清单并重新构建。
+旧配置与安装记录停用保留；导入同 ID 新包后恢复使用。C++ 内部插件移除 Protobuf 生成/链接，Rust 内部插件改用 SDK 视图方法。
 
 ```powershell
-cargo +stable build --locked -p vchat-internal-plugin --bin vchat-plugin-worker
-cargo +stable test -p vchat-plugin-api -p vchat-internal-plugin
-cargo +stable clippy -p vchat-plugin-api -p vchat-internal-plugin -p vchat-example-plugin --all-targets -- -D warnings
-git clone --depth 1 --branch v31.1 https://github.com/protocolbuffers/protobuf.git target/protobuf-src
-cmake -S target/protobuf-src -B target/protobuf-clean -DCMAKE_CXX_STANDARD=17 -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=OFF -Dprotobuf_BUILD_PROTOC_BINARIES=OFF -Dprotobuf_BUILD_LIBUPB=OFF -DCMAKE_INSTALL_PREFIX=<安装目录>
-cmake --build target/protobuf-clean --config Release --parallel 8 --target install
-cmake -S Plugins -B target/cpp-plugin -DCMAKE_PREFIX_PATH=<安装目录> -DVCHAT_PROTOC=<vendored protoc31.1路径> -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
-cmake --build target/cpp-plugin --config Release --parallel 4
-$env:VCHAT_CPP_TEST_LIBRARY = '<C++示例动态库路径>'
-cargo +stable test -p vchat-internal-plugin cpp_actual -- --ignored
+cargo test --locked -p vchat-plugin-api -p vchat-http-plugin -p vchat-internal-plugin
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-Windows x86_64 已验证 Rust DLL、C++ MSVC DLL、ABI 布局与中文/emoji Protobuf 交换；
-迁移测试验证计数连续，故障测试覆盖 start/restore 回滚、事件顺序、进程超时隔离、权限与配置暂存。
-三平台 CI 的 cpp-plugin 工作流构建固定 Protobuf 31.1，执行同一 C++ 动态库测试。
+跨平台 CI 验证布局、实际 C++ 动态库、开发 SDK 和正式 worker。主程序在仓库外以空数据目录验证独立运行，插件单独构建、打包与安装。
