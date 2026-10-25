@@ -25,7 +25,8 @@ v3.0 插件继续使用原有消息、转换和事件回放协议。
 `Response.remote.send { found, epoch, operation_id, message, identity }`。
 同一设备 ID 和操作 ID 在 PC 进程内幂等；相同内容返回原回执，内容改变返回 conflict。
 请求回执丢失时，用 `Request.remote.query { operation_id }` 查询。
-PC 重启导致 epoch 改变时，由用户确认重发。发送回执受本次进程数量预算约束。
+PC 重启导致 epoch 改变时，由用户确认重发。发送回执在本次 PC 进程中保留，
+达到 10 万条或 64 MiB 预算时，在接收新发送前返回 resource_exhausted。
 
 ## 媒体
 
@@ -33,6 +34,10 @@ PC 重启导致 epoch 改变时，由用户确认重发。发送回执受本次�
 PC 回环媒体 URL 留在宿主边界。`Request.remote.media_read` 指定 resource_id、
 offset 和 max_bytes，响应提供 offset/total_size/mime/data/eof。分块最大 256 KiB，
 媒体最大 16 MiB，访问与消息共用 Bearer 鉴权连接。
+
+外部 HTTP(S) 媒体首次完整下载后在 PC 内存冻结，同一 resource_id 的后续分块
+共享相同内容，并发首次读取合并为一个下载。缓存与在途下载合计预算为 64 MiB；
+预算满时返回 resource_exhausted。网络失败及下载取消释放预留预算，后续请求可重试。
 
 上传使用 `Request.remote.upload`，首块 upload_id 为空且 offset 为 0；随后使用
 服务器返回的 upload_id，并保持 offset 连续。最后一块 finish=true，返回 image。
