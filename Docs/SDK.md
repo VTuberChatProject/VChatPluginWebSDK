@@ -11,3 +11,5 @@
 每个请求使用唯一 request_id，失败检查 response.error。来源身份由连接登记决定。心跳由 WebSocket 协议层维护；客户端支持 Ping/Pong。单帧上限 4 MiB。
 
 Python/C++ 示例及生成命令见 [README](../README.md)。Native ABI 插件使用 [NativeSDK](https://github.com/VTuberChatProject/VChatPluginNativeSDK)。宿主行为参考 [插件系统设计](https://github.com/VTuberChatProject/VChatRev/blob/main/Docs/PluginSystemDesign.md)。
+
+v3.1 远程界面扩展见 [手机协议](Remote.md)：消息快照、完整增量、当前角色发送及媒体分块均使用既有鉴权 WebSocket。

@@ -5,7 +5,7 @@ message Envelope {
   uint32 major = 1;
   uint32 minor = 2;
   string request_id = 3;
-  oneof body { Request request = 10; Response response = 11; Event event = 12; }
+  oneof body { Request request = 10; Response response = 11; Event event = 12; RemoteTransfer remote_transfer = 13; }
 }
 message Request {
   oneof body {
@@ -14,6 +14,7 @@ message Request {
     MessageInput messages_incoming = 3;
     MessageInput messages_send = 4;
     TransformRequest transform = 5;
+    RemoteRequest remote = 6;
   }
 }
 message Response {
@@ -22,6 +23,7 @@ message Response {
     Empty message_types_register = 2;
     Message accepted_message = 3;
     TransformResult transform = 4;
+    RemoteResponse remote = 5;
     Error error = 15;
   }
 }
@@ -33,7 +35,7 @@ message Register {
   repeated OutputCard output_cards = 8; optional string last_event_id = 9;
   uint32 min_minor = 10; uint32 max_minor = 11;
 }
-message RegisterResult { string plugin_id = 1; string generation = 2; uint32 minor = 3; }
+message RegisterResult { string plugin_id = 1; string generation = 2; uint32 minor = 3; repeated string granted_capabilities = 4; }
 message RegisterMessageTypes { repeated MessageTypeDefinition types = 1; }
 message MessageTypeDefinition { string id = 1; string label = 2; }
 message MessageType { string plugin_kind = 1; string plugin_id = 2; string type_id = 3; }
@@ -66,3 +68,46 @@ message TransformResult { Document document = 1; }
 message Event { string event_id = 1; string kind = 2; Message message = 3; string extra_json = 4; }
 message OutputCard { string id = 1; string title = 2; string subtitle = 3; repeated OutputAction actions = 4; }
 message OutputAction { string id = 1; string label = 2; string kind = 3; string target = 4; }
+
+// v3.1 远程界面；媒体字节经同一鉴权连接传输。
+message RemoteRequest {
+  oneof body {
+    Empty subscribe = 1; RemoteSend send = 2; RemoteQuery query = 3;
+    RemoteMediaRead media_read = 4; RemoteUpload upload = 5;
+  }
+}
+message RemoteResponse {
+  oneof body {
+    Empty subscribed = 1; RemoteSendResult send = 2;
+    RemoteMediaChunk media = 3; RemoteUploadResult upload = 4;
+  }
+}
+message RemoteSend { string operation_id = 1; Document document = 2; }
+message RemoteQuery { string operation_id = 1; }
+message RemoteSendResult {
+  bool found = 1; string epoch = 2; string operation_id = 3; Message message = 4;
+  RemoteIdentity identity = 5;
+}
+message RemoteMediaRead { string resource_id = 1; uint64 offset = 2; uint32 max_bytes = 3; }
+message RemoteMediaChunk {
+  string resource_id = 1; uint64 offset = 2; uint64 total_size = 3;
+  string mime = 4; bytes data = 5; bool eof = 6;
+}
+// 首块 upload_id 为空，随后使用服务端返回 ID；offset 必须连续。
+message RemoteUpload {
+  string upload_id = 1; string name = 2; uint64 offset = 3;
+  bytes data = 4; bool finish = 5;
+}
+message RemoteUploadResult { string upload_id = 1; Image image = 2; }
+// data 为 RemoteUpdate 的 Protobuf 编码；按 index 收齐后原子应用。
+message RemoteTransfer {
+  string epoch = 1; uint64 revision = 2; string transfer_id = 3;
+  uint32 index = 4; uint32 count = 5; bytes data = 6;
+}
+message RemoteRecord { Message message = 1; bool is_self = 2; }
+message RemoteIdentity { string role_id = 1; string username = 2; optional string avatar_url = 3; }
+message RemoteUpdate {
+  bool snapshot = 1; uint64 base_revision = 2;
+  repeated RemoteRecord upserts = 3; repeated string removed_ids = 4;
+  RemoteIdentity identity = 5; repeated string order = 6;
+}

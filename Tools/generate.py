@@ -22,6 +22,7 @@ def main():
     if arguments.language == 'python':
         import shutil
         shutil.copy2(root / 'Examples/sdk-client.py', output / 'sdk-client.py')
+        shutil.copy2(root / 'Examples/remote-client.py', output / 'remote-client.py')
     logging.info('协议生成完成: %s', output)
 
 
