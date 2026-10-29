@@ -5,7 +5,7 @@ import logging
 import uuid
 
 
-async def connect(endpoint, token, plugin_id):
+async def connect(endpoint, token, plugin_id, output_card=False):
     """登记后投递一条结构化消息，并接收强类型响应和事件。"""
     import external_plugin_pb2 as protocol
     from websockets.asyncio.client import connect as websocket_connect
@@ -17,6 +17,11 @@ async def connect(endpoint, token, plugin_id):
         registration.id = plugin_id
         registration.name = "Protobuf SDK 示例"
         registration.capabilities.extend(["messages", "events"])
+        if output_card:
+            registration.min_minor = registration.max_minor = 2
+            registration.capabilities.extend(["ui", "output_cards_v1"])
+            registration.output_cards.add(id="console", title="SDK 控制台", subtitle="按卡片消费定向消息")
+            registration.output_endpoints.add(card_id="console", receipt_mode="completed")
         await socket.send(register.SerializeToString())
         result = protocol.Envelope.FromString(await socket.recv())
         if result.response.WhichOneof("body") == "error":
@@ -37,6 +42,18 @@ async def connect(endpoint, token, plugin_id):
                 raise RuntimeError("宿主数据帧需要为 Binary")
             envelope = protocol.Envelope.FromString(data)
             logging.info("收到 %s: %s", envelope.WhichOneof("body"), envelope)
+            if envelope.HasField("request") and envelope.request.HasField("output_delivery"):
+                delivery = envelope.request.output_delivery
+                logging.info("卡片 %s 消费消息 %s: %s", delivery.card_id, delivery.message_id,
+                             delivery.message.document)
+                acknowledgement = protocol.Envelope(major=3, minor=2, request_id=envelope.request_id)
+                acknowledgement.response.output_delivery.SetInParent()
+                await socket.send(acknowledgement.SerializeToString())
+                if delivery.operation != "preview":
+                    receipt = protocol.Envelope(major=3, minor=2, request_id=str(uuid.uuid4()))
+                    receipt.request.output_receipt.CopyFrom(delivery)
+                    receipt.request.output_receipt.status = "completed"
+                    await socket.send(receipt.SerializeToString())
 
 
 def main():
@@ -45,10 +62,11 @@ def main():
     parser.add_argument("--endpoint", default="ws://127.0.0.1:38601/api/v3/ws")
     parser.add_argument("--token", required=True)
     parser.add_argument("--id", default="example.python-sdk")
+    parser.add_argument("--output-card", action="store_true", help="声明并消费独立控制台输出卡片")
     arguments = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        asyncio.run(connect(arguments.endpoint, arguments.token, arguments.id))
+        asyncio.run(connect(arguments.endpoint, arguments.token, arguments.id, arguments.output_card))
     except KeyboardInterrupt:
         pass
     except Exception:

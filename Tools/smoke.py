@@ -47,6 +47,16 @@ def main():
     value = protocol.Envelope(major=3, request_id='offline-中文')
     value.request.register.id = 'example.offline'
     assert protocol.Envelope.FromString(value.SerializeToString()) == value
+    value.minor = 2
+    value.request.register.capabilities.extend(["ui", "output_cards_v1"])
+    value.request.register.output_cards.add(id="live", title="Live", subtitle="定向输出")
+    value.request.register.output_endpoints.add(card_id="live", receipt_mode="completed")
+    assert protocol.Envelope.FromString(value.SerializeToString()) == value
+    receipt = protocol.Envelope(major=3, minor=2, request_id="receipt")
+    receipt.request.output_receipt.card_id = "live"
+    receipt.request.output_receipt.status = "completed"
+    receipt.request.output_receipt.session_generation = str(uuid.uuid4())
+    assert protocol.Envelope.FromString(receipt.SerializeToString()) == receipt
     logging.info('Protobuf v3 离线往返通过')
     if arguments.endpoint:
         if not arguments.token:

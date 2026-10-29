@@ -15,6 +15,8 @@ message Request {
     MessageInput messages_send = 4;
     TransformRequest transform = 5;
     RemoteRequest remote = 6;
+    OutputPacket output_delivery = 7;
+    OutputPacket output_receipt = 8;
   }
 }
 message Response {
@@ -24,6 +26,8 @@ message Response {
     Message accepted_message = 3;
     TransformResult transform = 4;
     RemoteResponse remote = 5;
+    Empty output_receipt = 6;
+    Empty output_delivery = 7;
     Error error = 15;
   }
 }
@@ -34,6 +38,7 @@ message Register {
   string description = 5; optional string config_url = 6; repeated string capabilities = 7;
   repeated OutputCard output_cards = 8; optional string last_event_id = 9;
   uint32 min_minor = 10; uint32 max_minor = 11;
+  repeated OutputEndpoint output_endpoints = 12;
 }
 message RegisterResult { string plugin_id = 1; string generation = 2; uint32 minor = 3; repeated string granted_capabilities = 4; }
 message RegisterMessageTypes { repeated MessageTypeDefinition types = 1; }
@@ -110,4 +115,13 @@ message RemoteUpdate {
   bool snapshot = 1; uint64 base_revision = 2;
   repeated RemoteRecord upserts = 3; repeated string removed_ids = 4;
   RemoteIdentity identity = 5; repeated string order = 6;
+}
+
+// v3.2 卡片输出：身份、批次与会话代次在投递和回执中原样往返。
+message OutputEndpoint { string card_id = 1; string receipt_mode = 2; }
+message OutputPacket {
+  string frontend_id = 1; string plugin_id = 2; string card_id = 3;
+  string message_id = 4; string batch_id = 5; Message message = 6;
+  optional string run_id = 7; uint64 generation = 8; string status = 9;
+  string operation = 10; string session_generation = 11; string error = 12;
 }
